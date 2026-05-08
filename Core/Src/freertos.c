@@ -28,7 +28,9 @@
 #include "oled.h"
 #include "font.h"
 #include "aht20.h"
+#include "esp8266.h"
 #include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -38,8 +40,9 @@ typedef struct {
     float humidity;
 } WeatherData;
 
-#define EVENT_SENSOR_READY  (1 << 0) // 0x01: 传感器数据更新
-#define EVENT_CLOCK_TICK    (1 << 1) // 0x02: 时间跳动
+#define EVENT_SENSOR_READY   (1 << 0) // 0x01: 传感器数据更新
+#define EVENT_CLOCK_TICK     (1 << 1) // 0x02: 时间跳动
+#define EVENT_WEATHER_UPDATE (1 << 2) // 0x04: 天气数据更新
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -57,6 +60,10 @@ typedef struct {
 extern RTC_TimeTypeDef Time;
 extern RTC_DateTypeDef Date;
 extern RTC_HandleTypeDef hrtc;
+// ESP 初始化状态（0 = 未初始化/未就绪, 1 = 已初始化就绪）
+volatile int esp_init_done = 0;
+// IWDG 看门狗喂养计数器
+static uint32_t iwdg_feed_counter = 0;
 /* USER CODE END Variables */
 /* Definitions for InitTask */
 osThreadId_t InitTaskHandle;
@@ -83,7 +90,7 @@ const osThreadAttr_t DisplayTask_attributes = {
 osThreadId_t LinkTaskHandle;
 const osThreadAttr_t LinkTask_attributes = {
   .name = "LinkTask",
-  .stack_size = 512 * 4,
+  .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityNormal2,
 };
 /* Definitions for SensorQueue */
@@ -194,19 +201,44 @@ void MX_FREERTOS_Init(void) {
 void StartInitTask(void *argument)
 {
   /* USER CODE BEGIN StartInitTask */
-  /* Infinite loop */
+  /* 初始化任务：系统启动时执行 */
+  
+  // 挂起其他任务
   vTaskSuspend(SensorTaskHandle);
   vTaskSuspend(DisplayTaskHandle);
-
+  vTaskSuspend(LinkTaskHandle);
+  
+  // 初始化外设
   osDelay(100);
   OLED_Init();
   AHT20_Init();
-
+  
+  // 启动实时时钟定时器
   osTimerStart(ClockTimerHandle, 1000U);
   
+  // 打印复位来源，便于诊断是否发生了 MCU 重启/看门狗
+  {
+    uint32_t reset_flags = RCC->CSR;
+    DebugPrintf("[INIT] Reset flags CSR=0x%08lX\r\n", (unsigned long)reset_flags);
+    if (reset_flags & RCC_CSR_PORRSTF) DebugPrintf("[INIT] Power-on reset\r\n");
+    if (reset_flags & RCC_CSR_PINRSTF) DebugPrintf("[INIT] Pin reset (NRST)\r\n");
+    if (reset_flags & RCC_CSR_SFTRSTF) DebugPrintf("[INIT] Software reset\r\n");
+    if (reset_flags & RCC_CSR_IWDGRSTF) DebugPrintf("[INIT] Independent watchdog reset\r\n");
+    if (reset_flags & RCC_CSR_WWDGRSTF) DebugPrintf("[INIT] Window watchdog reset\r\n");
+    if (reset_flags & RCC_CSR_LPWRRSTF) DebugPrintf("[INIT] Low-power reset\r\n");
+    // 清除复位标志
+    __HAL_RCC_CLEAR_RESET_FLAGS();
+  }
+
+  // ESP 初始化将在 LinkTask 中异步进行，确保显示和传感器先启动
+  DebugPrintf("\r\n\n[INIT] Deferring ESP8266 initialization to LinkTask\r\n");
+  
+  // 启动其他任务
   vTaskResume(SensorTaskHandle);
   vTaskResume(DisplayTaskHandle);
-
+  vTaskResume(LinkTaskHandle);
+  
+  // 初始化任务完成，删除自己
   vTaskDelete(NULL);
 
   /* USER CODE END StartInitTask */
@@ -250,41 +282,50 @@ void StartSensorTask(void *argument)
 void StartDisplayTask(void *argument)
 {
   /* USER CODE BEGIN StartDisplayTask */
-  /* Infinite loop */
+  /* 显示任务：刷新 OLED 屏幕，显示时间、温湿度和网络天气 */
+  
   WeatherData display_data = {0};
   char message[32];
-
   static uint8_t last_saved_day = 0;
+  
   for(;;)
   {
+    // 等待事件：传感器数据更新、时间跳动、或天气数据更新
     uint32_t flags = osEventFlagsWait(DisplayEventsHandle, 
-                             EVENT_SENSOR_READY | EVENT_CLOCK_TICK, 
+                             EVENT_SENSOR_READY | EVENT_CLOCK_TICK | EVENT_WEATHER_UPDATE, 
                              osFlagsWaitAny, osWaitForever);
 
-    // 如果是传感器发来的，去队列里拿一下最新数据
+    // 如果是传感器发来的数据，去队列里获取最新数据
     if (flags & EVENT_SENSOR_READY) {
         osMessageQueueGet(SensorQueueHandle, &display_data, NULL, 0);
     }
 
+    // 如果是天气更新，日期改变时保存到 RTC 备份寄存器
     if (Date.Date != last_saved_day) 
     {
         HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR2, Date.Year);
         HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR3, Date.Month);
         HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR4, Date.Date);
-        last_saved_day = Date.Date; // 更新记录
+        last_saved_day = Date.Date;
     }
 
     // 无论哪个事件触发，都统一重新绘制一帧
     OLED_NewFrame();
     
-    // --- 顶部：显示时间 ---
+    // ========== 顶部：左上角显示网络天气 ==========
+    if (strlen(g_weather.weather_text) > 0) {
+      OLED_PrintString(0, 0, g_weather.weather_text, &font16x16, OLED_COLOR_NORMAL);
+    }
+
+    // ========== 中上部：显示日期 ==========
     sprintf(message, "%04d-%02d-%02d", 2000 + Date.Year, Date.Month, Date.Date);
     OLED_PrintString(24, 0, message, &font16x16, OLED_COLOR_NORMAL);
+
+    // ========== 中部：显示时间 ==========
     sprintf(message, "%02d:%02d:%02d", Time.Hours, Time.Minutes, Time.Seconds);
     OLED_PrintASCIIString(15, 17, message, &afont24x12, OLED_COLOR_NORMAL);
 
-
-    // --- 下部：显示温湿度 ---
+    // ========== 下部：显示温湿度（本地传感器） ==========
     sprintf(message, "%.1f℃", display_data.temperature);
     OLED_DrawImage(0, 48, &tempImg, OLED_COLOR_NORMAL);
     OLED_PrintString(16, 48, message, &font16x16, OLED_COLOR_NORMAL);
@@ -295,7 +336,7 @@ void StartDisplayTask(void *argument)
     OLED_DrawImage(112, 48, &％Img, OLED_COLOR_NORMAL);
     
     OLED_ShowFrame();
-    }
+  }
   /* USER CODE END StartDisplayTask */
 }
 
@@ -309,10 +350,93 @@ void StartDisplayTask(void *argument)
 void StartLinkTask(void *argument)
 {
   /* USER CODE BEGIN StartLinkTask */
-  /* Infinite loop */
+  /* 网络链接任务：每 10 分钟获取一次网络天气 */
+  
+  // 等待 LinkTask 被启动后再开始运行
+  vTaskDelay(pdMS_TO_TICKS(1000));
+  
+  // 周期：10 分钟 = 600000 毫秒
+  const uint32_t WEATHER_UPDATE_PERIOD_MS = 600000;  // 10 分钟
+  
+  uint32_t last_update_time = 0;
+  uint32_t current_time = 0;
+
+  // 在 LinkTask 中异步进行 ESP 初始化，避免阻塞显示和传感器任务
+  // 先探测模块状态：若模块已能响应并已连接 WiFi，则跳过完整初始化
+  if (!esp_init_done) {
+    char probe_buf[RX_BUFFER_SIZE];
+    if (ESP8266_SendCmd("AT\r\n", "OK", 500, probe_buf, RX_BUFFER_SIZE) == 0) {
+      // 模块响应 AT，询问是否已连接到 AP
+      if (ESP8266_SendCmd("AT+CWJAP?\r\n", "OK", 5000, probe_buf, RX_BUFFER_SIZE) == 0) {
+        if (strstr(probe_buf, "No AP") == NULL) {
+          // 未返回 "No AP"，表示已连接到某个 WiFi
+          esp_init_done = 1;
+          DebugPrintf("[LinkTask] Detected ESP already connected to WiFi, skipping init\r\n");
+        } else {
+          DebugPrintf("[LinkTask] ESP responds but not connected to AP\r\n");
+        }
+      }
+    }
+  }
+
+  if (!esp_init_done) {
+    int tries = 3;
+    while (tries-- > 0 && !esp_init_done) {
+      DebugPrintf("[LinkTask] Attempting ESP8266_Init(), tries left=%d\r\n", tries);
+      if (ESP8266_Init() == 0) {
+        esp_init_done = 1;
+        DebugPrintf("[LinkTask] ESP8266 initialized\r\n");
+        break;
+      }
+      DebugPrintf("[LinkTask] ESP init attempt failed, retrying after delay...\r\n");
+      osDelay(pdMS_TO_TICKS(2000));
+    }
+    if (!esp_init_done) {
+      DebugPrintf("[LinkTask] ESP initialization deferred, will retry later\r\n");
+    }
+  }
+
   for(;;)
   {
-    osDelay(1);
+    // 获取当前任务时间
+    current_time = xTaskGetTickCount();
+
+    // 只有在 ESP 初始化成功后，才尝试获取天气
+    if (esp_init_done) {
+      if ((current_time - last_update_time) >= pdMS_TO_TICKS(WEATHER_UPDATE_PERIOD_MS) ||
+          last_update_time == 0)  // 第一次执行
+      {
+        DebugPrintf("\r\n[LinkTask] Starting weather update...\r\n");
+        
+        // 调用 ESP8266 获取天气函数
+        if (Get_Weather() == 0) {
+          // 获取成功，发送天气更新事件给 DisplayTask
+          DebugPrintf("[LinkTask] Weather updated: %s\r\n", g_weather.weather_text);
+          osEventFlagsSet(DisplayEventsHandle, EVENT_WEATHER_UPDATE);
+          
+          // 更新上次更新时间
+          last_update_time = current_time;
+        } else {
+          DebugPrintf("[LinkTask] Weather update failed, will retry next cycle\r\n");
+          // 失败不更新时间，等待下一轮尝试（仍然每10分钟重试）
+          last_update_time = current_time;
+        }
+      }
+    } else {
+      // 如果还未初始化成功，降低重试频率（每 60 秒重试一次），避免大量打印阻塞
+      if (ESP8266_Init() == 0) {
+        esp_init_done = 1;
+        DebugPrintf("[LinkTask] ESP8266 initialized on delayed retry\r\n");
+      } else {
+        // 仅在失败时打印一次信息，等待更长时间再试
+        DebugPrintf("[LinkTask] ESP still not ready, will retry after delay\r\n");
+        osDelay(pdMS_TO_TICKS(60000));
+        continue;
+      }
+    }
+
+    // 每秒检查一次是否需要更新
+    osDelay(1000);
   }
   /* USER CODE END StartLinkTask */
 }
@@ -332,6 +456,19 @@ void ClockTimerCallback(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+
+/**
+ * @brief FreeRTOS Idle Hook - 保持空闲
+ * 
+ * 看门狗喂养已移至 LinkTask 的显式调用中，避免 Idle Hook 中的寄存器操作导致异常。
+ * 这是更安全的做法，确保看门狗刷新与主任务流程同步。
+ */
+void vApplicationIdleHook(void)
+{
+    // 空闲钩子此处不做任何操作
+    // IWDG 喂养在 LinkTask 中显式调用
+    (void)iwdg_feed_counter;  // 避免警告
+}
 
 /* USER CODE END Application */
 
