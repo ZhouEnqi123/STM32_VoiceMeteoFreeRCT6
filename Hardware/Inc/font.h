@@ -59,4 +59,6 @@ extern const Image WeatherFogImg;
 extern const Image WeatherHailImg;
 extern const Image WeatherDustImg;
 extern const Image WeatherUnknownImg;
+
+const Image *GetWeatherIcon(const char *weather_text);
 #endif // __FONT_H

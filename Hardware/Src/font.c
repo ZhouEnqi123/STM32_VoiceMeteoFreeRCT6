@@ -10,6 +10,7 @@
  */
 // clang-format off
 #include "font.h"
+#include <string.h>
 
 // 8*6 ASCII
 const unsigned char ascii_8x6[][6] = {
@@ -539,3 +540,62 @@ const uint8_t NoWIFIData[] = {
 0x31, 0x4b, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 
 };
 const Image NoWIFIImg = {16, 16, NoWIFIData};
+
+const Image *GetWeatherIcon(const char *weather_text)
+{
+    if (weather_text == NULL || weather_text[0] == '\0') {
+        return NULL;
+    }
+
+    if (strstr(weather_text, "晴间多云") != NULL) {
+        return &WeatherPartlyCloudyImg;
+    }
+    if (strstr(weather_text, "多云") != NULL) {
+        return &WeatherCloudyImg;
+    }
+    if (strstr(weather_text, "晴") != NULL) {
+        return &WeatherSunnyImg;
+    }
+    if (strstr(weather_text, "阴") != NULL) {
+        return &WeatherOvercastImg;
+    }
+    if (strstr(weather_text, "雷") != NULL) {
+        return &WeatherThunderstormImg;
+    }
+    if (strstr(weather_text, "暴雨") != NULL) {
+        return &WeatherHeavyRainImg;
+    }
+    if (strstr(weather_text, "大雨") != NULL) {
+        return &WeatherHeavyRainImg;
+    }
+    if (strstr(weather_text, "中雨") != NULL) {
+        return &WeatherModerateRainImg;
+    }
+    if (strstr(weather_text, "小雨") != NULL || strstr(weather_text, "阵雨") != NULL) {
+        return &WeatherLightRainImg;
+    }
+    if (strstr(weather_text, "雨夹雪") != NULL) {
+        return &WeatherSleetImg;
+    }
+    if (strstr(weather_text, "暴雪") != NULL || strstr(weather_text, "大雪") != NULL) {
+        return &WeatherHeavySnowImg;
+    }
+    if (strstr(weather_text, "中雪") != NULL) {
+        return &WeatherModerateSnowImg;
+    }
+    if (strstr(weather_text, "小雪") != NULL || strstr(weather_text, "阵雪") != NULL) {
+        return &WeatherLightSnowImg;
+    }
+    if (strstr(weather_text, "冰雹") != NULL) {
+        return &WeatherHailImg;
+    }
+    if (strstr(weather_text, "雾") != NULL || strstr(weather_text, "霾") != NULL) {
+        return &WeatherFogImg;
+    }
+    if (strstr(weather_text, "沙尘") != NULL || strstr(weather_text, "扬沙") != NULL || strstr(weather_text, "浮尘") != NULL) {
+        return &WeatherDustImg;
+    }
+
+    return &WeatherUnknownImg;
+}
+
