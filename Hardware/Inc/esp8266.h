@@ -55,6 +55,7 @@ typedef struct {
 
 /* ==================== 全局变量声明 ==================== */
 extern NetWeather_t g_weather;      // 全局天气数据，供其他任务访问
+extern uint8_t g_wifi_connected;      // WiFi 连接状态：0=未连接, 1=已连接
 
 extern volatile char g_uart2_rx_buffer[RX_BUFFER_SIZE];  // UART2接收缓冲区
 

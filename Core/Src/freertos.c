@@ -232,12 +232,12 @@ void StartInitTask(void *argument)
 
   // ESP 初始化将在 LinkTask 中异步进行，确保显示和传感器先启动
   DebugPrintf("\r\n\n[INIT] Deferring ESP8266 initialization to LinkTask\r\n");
-  
-  // 启动其他任务
+
+  // 启动显示、传感器和 LinkTask，后者负责从 AT 检测到 WiFi 连接的完整流程
   vTaskResume(SensorTaskHandle);
   vTaskResume(DisplayTaskHandle);
   vTaskResume(LinkTaskHandle);
-  
+
   // 初始化任务完成，删除自己
   vTaskDelete(NULL);
 
@@ -279,6 +279,65 @@ void StartSensorTask(void *argument)
 * @retval None
 */
 /* USER CODE END Header_StartDisplayTask */
+
+static const Image *GetWeatherIcon(const char *weather_text)
+{
+    if (weather_text == NULL || weather_text[0] == '\0') {
+        return NULL;
+    }
+
+    if (strstr(weather_text, "晴间多云") != NULL) {
+        return &WeatherPartlyCloudyImg;
+    }
+    if (strstr(weather_text, "多云") != NULL) {
+        return &WeatherCloudyImg;
+    }
+    if (strstr(weather_text, "晴") != NULL) {
+        return &WeatherSunnyImg;
+    }
+    if (strstr(weather_text, "阴") != NULL) {
+        return &WeatherOvercastImg;
+    }
+    if (strstr(weather_text, "雷") != NULL) {
+        return &WeatherThunderstormImg;
+    }
+    if (strstr(weather_text, "暴雨") != NULL) {
+        return &WeatherHeavyRainImg;
+    }
+    if (strstr(weather_text, "大雨") != NULL) {
+        return &WeatherHeavyRainImg;
+    }
+    if (strstr(weather_text, "中雨") != NULL) {
+        return &WeatherModerateRainImg;
+    }
+    if (strstr(weather_text, "小雨") != NULL || strstr(weather_text, "阵雨") != NULL) {
+        return &WeatherLightRainImg;
+    }
+    if (strstr(weather_text, "雨夹雪") != NULL) {
+        return &WeatherSleetImg;
+    }
+    if (strstr(weather_text, "暴雪") != NULL || strstr(weather_text, "大雪") != NULL) {
+        return &WeatherHeavySnowImg;
+    }
+    if (strstr(weather_text, "中雪") != NULL) {
+        return &WeatherModerateSnowImg;
+    }
+    if (strstr(weather_text, "小雪") != NULL || strstr(weather_text, "阵雪") != NULL) {
+        return &WeatherLightSnowImg;
+    }
+    if (strstr(weather_text, "冰雹") != NULL) {
+        return &WeatherHailImg;
+    }
+    if (strstr(weather_text, "雾") != NULL || strstr(weather_text, "霾") != NULL) {
+        return &WeatherFogImg;
+    }
+    if (strstr(weather_text, "沙尘") != NULL || strstr(weather_text, "扬沙") != NULL || strstr(weather_text, "浮尘") != NULL) {
+        return &WeatherDustImg;
+    }
+
+    return &WeatherUnknownImg;
+}
+
 void StartDisplayTask(void *argument)
 {
   /* USER CODE BEGIN StartDisplayTask */
@@ -312,9 +371,14 @@ void StartDisplayTask(void *argument)
     // 无论哪个事件触发，都统一重新绘制一帧
     OLED_NewFrame();
     
-    // ========== 顶部：左上角显示网络天气 ==========
-    if (strlen(g_weather.weather_text) > 0) {
-      OLED_PrintString(0, 0, g_weather.weather_text, &font16x16, OLED_COLOR_NORMAL);
+    // ========== 顶部：左上角显示网络天气/WiFi状态图标 ==========
+    if (g_wifi_connected == 0) {
+      OLED_DrawImage(0, 0, &NoWIFIImg, OLED_COLOR_NORMAL);
+    } else {
+      const Image *weather_icon = GetWeatherIcon(g_weather.weather_text);
+      if (weather_icon != NULL) {
+        OLED_DrawImage(0, 0, weather_icon, OLED_COLOR_NORMAL);
+      }
     }
 
     // ========== 中上部：显示日期 ==========
@@ -362,23 +426,6 @@ void StartLinkTask(void *argument)
   uint32_t current_time = 0;
 
   // 在 LinkTask 中异步进行 ESP 初始化，避免阻塞显示和传感器任务
-  // 先探测模块状态：若模块已能响应并已连接 WiFi，则跳过完整初始化
-  if (!esp_init_done) {
-    char probe_buf[RX_BUFFER_SIZE];
-    if (ESP8266_SendCmd("AT\r\n", "OK", 500, probe_buf, RX_BUFFER_SIZE) == 0) {
-      // 模块响应 AT，询问是否已连接到 AP
-      if (ESP8266_SendCmd("AT+CWJAP?\r\n", "OK", 5000, probe_buf, RX_BUFFER_SIZE) == 0) {
-        if (strstr(probe_buf, "No AP") == NULL) {
-          // 未返回 "No AP"，表示已连接到某个 WiFi
-          esp_init_done = 1;
-          DebugPrintf("[LinkTask] Detected ESP already connected to WiFi, skipping init\r\n");
-        } else {
-          DebugPrintf("[LinkTask] ESP responds but not connected to AP\r\n");
-        }
-      }
-    }
-  }
-
   if (!esp_init_done) {
     int tries = 3;
     while (tries-- > 0 && !esp_init_done) {

@@ -166,10 +166,6 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     /* USART2 interrupt Init */
     HAL_NVIC_SetPriority(USART2_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
-
-    /* DMA interrupt for USART2 RX is not required for simple polling, but enabling it is safe */
-    HAL_NVIC_SetPriority(DMA1_Channel6_IRQn, 5, 0);
-    HAL_NVIC_EnableIRQ(DMA1_Channel6_IRQn);
   /* USER CODE BEGIN USART2_MspInit 1 */
 
   /* USER CODE END USART2_MspInit 1 */

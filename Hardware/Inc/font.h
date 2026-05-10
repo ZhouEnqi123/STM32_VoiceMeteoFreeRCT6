@@ -42,4 +42,21 @@ extern const Image tempImg;
 extern const Image humiImg;
 extern const Image ％Img;
 extern const Image NoWIFIImg;
+
+extern const Image WeatherSunnyImg;
+extern const Image WeatherPartlyCloudyImg;
+extern const Image WeatherCloudyImg;
+extern const Image WeatherOvercastImg;
+extern const Image WeatherLightRainImg;
+extern const Image WeatherModerateRainImg;
+extern const Image WeatherHeavyRainImg;
+extern const Image WeatherThunderstormImg;
+extern const Image WeatherSleetImg;
+extern const Image WeatherLightSnowImg;
+extern const Image WeatherModerateSnowImg;
+extern const Image WeatherHeavySnowImg;
+extern const Image WeatherFogImg;
+extern const Image WeatherHailImg;
+extern const Image WeatherDustImg;
+extern const Image WeatherUnknownImg;
 #endif // __FONT_H

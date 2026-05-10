@@ -32,6 +32,9 @@ extern DMA_HandleTypeDef hdma_usart2_rx;  // UART2 DMA 接收处理器
 /** @brief 网络天气数据，供全局访问 */
 NetWeather_t g_weather = {0};
 
+/** @brief 当前 WiFi 连接状态，DisplayTask 可据此显示 NoWIFI 图标 */
+uint8_t g_wifi_connected = 0;
+
 /** @brief UART2 接收缓冲区（静态分配，1024字节） */
 volatile char g_uart2_rx_buffer[RX_BUFFER_SIZE] = {0};
 
@@ -247,11 +250,27 @@ int ESP8266_Init(void)
     ClearRxBuffer();
     if (ESP8266_SendCmd("AT+CWJAP?\r\n", "OK", 5000, esp8266_rx_buffer, RX_BUFFER_SIZE) == 0) {
         if (strstr(esp8266_rx_buffer, "No AP") == NULL) {
-            DebugPrintf("[OK] ESP8266 already connected to WiFi\r\n");
-            return 0;
+            char *ssid_start = strstr(esp8266_rx_buffer, "+CWJAP:\"");
+            if (ssid_start != NULL) {
+                ssid_start += strlen("+CWJAP:\"");
+                char *ssid_end = strchr(ssid_start, '"');
+                if (ssid_end != NULL) {
+                    size_t ssid_len = ssid_end - ssid_start;
+                    if (ssid_len == strlen(WIFI_SSID) && strncmp(ssid_start, WIFI_SSID, ssid_len) == 0) {
+                        g_wifi_connected = 1;
+                        DebugPrintf("[OK] ESP8266 already connected to configured WiFi '%s'\r\n", WIFI_SSID);
+                        return 0;
+                    }
+                }
+            }
+            g_wifi_connected = 0;
+            DebugPrintf("[INFO] ESP8266 connected to other AP or unknown SSID, starting join...\r\n");
+        } else {
+            g_wifi_connected = 0;
+            DebugPrintf("[INFO] ESP8266 not connected to AP, starting join...\r\n");
         }
-        DebugPrintf("[INFO] ESP8266 not connected to AP, starting join...\r\n");
     } else {
+        g_wifi_connected = 0;
         DebugPrintf("[WARN] AT+CWJAP? probe failed, proceeding to join...\r\n");
     }
 
@@ -264,9 +283,11 @@ int ESP8266_Init(void)
     // CWJAP 需要较长的超时时间（至少8秒），因为 WiFi 连接可能较慢
     ret = ESP8266_SendCmd(esp8266_cmd_buffer, "OK", CWJAP_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
     if (ret != 0) {
+        g_wifi_connected = 0;
         DebugPrintf("[FAIL] AT+CWJAP failed\r\n");
         return -1;
     }
+    g_wifi_connected = 1;
     DebugPrintf("[OK] WiFi connected successfully\r\n");
     
     DebugPrintf("\n========== ESP8266 Init Success ==========\r\n");
@@ -299,6 +320,26 @@ int Get_Weather(void)
     int ret = 0;
     
     DebugPrintf("\n========== Get Weather ==========\r\n");
+
+    // 先检查当前 WiFi 状态，如果已断开则直接返回失败，显示 NoWIFI 图标
+    ClearRxBuffer();
+    if (ESP8266_SendCmd("AT+CWJAP?\r\n", "OK", 5000, esp8266_rx_buffer, RX_BUFFER_SIZE) == 0) {
+        if (strstr(esp8266_rx_buffer, "No AP") != NULL) {
+            g_wifi_connected = 0;
+            DebugPrintf("[WARN] WiFi disconnected (No AP)\r\n");
+            return -1;
+        }
+        if (strstr(esp8266_rx_buffer, "+CWJAP:") == NULL) {
+            g_wifi_connected = 0;
+            DebugPrintf("[WARN] WiFi probe returned OK but no active AP\r\n");
+            return -1;
+        }
+        g_wifi_connected = 1;
+    } else {
+        g_wifi_connected = 0;
+        DebugPrintf("[WARN] WiFi state probe failed\r\n");
+        return -1;
+    }
     
     // 步骤 0: 清理任何现存的 TCP 连接，避免连接状态冲突
     // 先禁用透传模式（如果之前未正确退出），再关闭连接
