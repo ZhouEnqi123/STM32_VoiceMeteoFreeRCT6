@@ -49,6 +49,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Hardware/Src/font.c
     hardware/src/aht20.c
     Hardware/Src/esp8266.c
+    Hardware/Src/Voice.c
 )
 
 # Add include paths

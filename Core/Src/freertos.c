@@ -29,6 +29,7 @@
 #include "font.h"
 #include "aht20.h"
 #include "esp8266.h"
+#include "Voice.h"
 #include <stdio.h>
 #include <string.h>
 /* USER CODE END Includes */
@@ -93,6 +94,13 @@ const osThreadAttr_t LinkTask_attributes = {
   .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityNormal2,
 };
+/* Definitions for VoiceTask */
+osThreadId_t VoiceTaskHandle;
+const osThreadAttr_t VoiceTask_attributes = {
+  .name = "VoiceTask",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal,
+};
 /* Definitions for SensorQueue */
 osMessageQueueId_t SensorQueueHandle;
 const osMessageQueueAttr_t SensorQueue_attributes = {
@@ -102,6 +110,11 @@ const osMessageQueueAttr_t SensorQueue_attributes = {
 osMessageQueueId_t LinkQueueHandle;
 const osMessageQueueAttr_t LinkQueue_attributes = {
   .name = "LinkQueue"
+};
+/* Definitions for VoiceQueueHandle */
+osMessageQueueId_t VoiceQueueHandleHandle;
+const osMessageQueueAttr_t VoiceQueueHandle_attributes = {
+  .name = "VoiceQueueHandle"
 };
 /* Definitions for ClockTimer */
 osTimerId_t ClockTimerHandle;
@@ -123,6 +136,7 @@ void StartInitTask(void *argument);
 void StartSensorTask(void *argument);
 void StartDisplayTask(void *argument);
 void StartLinkTask(void *argument);
+void StartVoiceTask(void *argument);
 void ClockTimerCallback(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -160,6 +174,9 @@ void MX_FREERTOS_Init(void) {
   /* creation of LinkQueue */
   LinkQueueHandle = osMessageQueueNew (1, sizeof(uint16_t), &LinkQueue_attributes);
 
+  /* creation of VoiceQueueHandle */
+  VoiceQueueHandleHandle = osMessageQueueNew (16, sizeof(uint16_t), &VoiceQueueHandle_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
@@ -176,6 +193,9 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of LinkTask */
   LinkTaskHandle = osThreadNew(StartLinkTask, NULL, &LinkTask_attributes);
+
+  /* creation of VoiceTask */
+  VoiceTaskHandle = osThreadNew(StartVoiceTask, NULL, &VoiceTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -212,6 +232,9 @@ void StartInitTask(void *argument)
   osDelay(100);
   OLED_Init();
   AHT20_Init();
+  Voice_Init();
+  Voice_PlayStartup();
+  Voice_WaitForPlaybackComplete(20000U);
   
   // 启动实时时钟定时器
   osTimerStart(ClockTimerHandle, 1000U);
@@ -263,6 +286,7 @@ void StartSensorTask(void *argument)
 
     sensor_data.temperature = AHT20_Temperature();
     sensor_data.humidity = AHT20_Humidity();
+    Voice_UpdateSensorData(sensor_data.temperature, sensor_data.humidity);
 
     osMessageQueuePut(SensorQueueHandle, &sensor_data, 0, 0);
     osEventFlagsSet(DisplayEventsHandle, EVENT_SENSOR_READY);
@@ -427,6 +451,20 @@ void StartLinkTask(void *argument)
     osDelay(1000);
   }
   /* USER CODE END StartLinkTask */
+}
+
+/* USER CODE BEGIN Header_StartVoiceTask */
+/**
+* @brief Function implementing the VoiceTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartVoiceTask */
+void StartVoiceTask(void *argument)
+{
+  /* USER CODE BEGIN StartVoiceTask */
+  Voice_TaskLoop();
+  /* USER CODE END StartVoiceTask */
 }
 
 /* ClockTimerCallback function */
