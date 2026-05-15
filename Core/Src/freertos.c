@@ -233,11 +233,17 @@ void StartInitTask(void *argument)
   OLED_Init();
   AHT20_Init();
   Voice_Init();
-  Voice_PlayStartup();
-  Voice_WaitForPlaybackComplete(20000U);
-  
+
   // 启动实时时钟定时器
   osTimerStart(ClockTimerHandle, 1000U);
+
+  // 启动显示、传感器和 LinkTask，后者负责从 AT 检测到 WiFi 连接的完整流程
+  vTaskResume(SensorTaskHandle);
+  vTaskResume(DisplayTaskHandle);
+  vTaskResume(LinkTaskHandle);
+
+  // 开机时播放启动音频，但不阻塞 OLED 点亮
+  Voice_PlayStartup();
   
   // 打印复位来源，便于诊断是否发生了 MCU 重启/看门狗
   {
