@@ -18,6 +18,7 @@
 
 #include "esp8266.h"
 #include "usart.h"
+#include "rtc.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include <stdio.h>
@@ -38,6 +39,14 @@ uint8_t g_wifi_connected = 0;
 /** @brief UART2 接收缓冲区（静态分配，1024字节） */
 volatile char g_uart2_rx_buffer[RX_BUFFER_SIZE] = {0};
 
+#define TIME_HOST       "api.pinduoduo.com"
+#define TIME_PATH       "/api/server/_stm"
+#define TIME_REQUEST_TEMPLATE \
+    "GET " TIME_PATH " HTTP/1.1\r\n" \
+    "Host: " TIME_HOST "\r\n" \
+    "Connection: close\r\n" \
+    "\r\n"
+#define BEIJING_OFFSET_SECONDS 28800U
 
 /** @brief ESP8266 命令与响应临时缓冲区，避免在任务堆栈上分配 1KB 缓冲 */
 static char esp8266_rx_buffer[RX_BUFFER_SIZE] = {0};
@@ -49,6 +58,9 @@ static char esp8266_cmd_buffer[256] = {0};
  * @brief 清空 UART2 接收缓冲区
  */
 static void ClearRxBuffer(void);
+static int ESP8266_ParseServerTime(const char *buf, uint64_t *server_time_ms);
+static int ESP8266_SetRtcFromUnix(uint32_t utc_seconds);
+static void ESP8266_ExitTransparentMode(void);
 
 /* ==================== UART2 缓冲区管理 ==================== */
 
@@ -317,7 +329,7 @@ int ESP8266_Init(void)
  */
 int Get_Weather(void)
 {
-    int ret = 0;
+    int ret = -1;
     
     DebugPrintf("\n========== Get Weather ==========\r\n");
 
@@ -327,18 +339,18 @@ int Get_Weather(void)
         if (strstr(esp8266_rx_buffer, "No AP") != NULL) {
             g_wifi_connected = 0;
             DebugPrintf("[WARN] WiFi disconnected (No AP)\r\n");
-            return -1;
+            goto cleanup;
         }
         if (strstr(esp8266_rx_buffer, "+CWJAP:") == NULL) {
             g_wifi_connected = 0;
             DebugPrintf("[WARN] WiFi probe returned OK but no active AP\r\n");
-            return -1;
+            goto cleanup;
         }
         g_wifi_connected = 1;
     } else {
         g_wifi_connected = 0;
         DebugPrintf("[WARN] WiFi state probe failed\r\n");
-        return -1;
+        goto cleanup;
     }
     
     // 步骤 0: 清理任何现存的 TCP 连接，避免连接状态冲突
@@ -384,7 +396,7 @@ int Get_Weather(void)
                               "OK", TCP_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
         if (ret != 0) {
             DebugPrintf("[FAIL] TCP connection failed\r\n");
-            return -1;
+            goto cleanup;
         }
     }
     DebugPrintf("[OK] TCP connected\r\n");
@@ -396,7 +408,7 @@ int Get_Weather(void)
     ret = ESP8266_SendCmd("AT+CIPMODE=1\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
     if (ret != 0) {
         DebugPrintf("[FAIL] CIPMODE=1 failed\r\n");
-        return -1;
+        goto cleanup;
     }
     DebugPrintf("[OK] Transparent mode enabled\r\n");
     
@@ -407,7 +419,7 @@ int Get_Weather(void)
     ret = ESP8266_SendCmd("AT+CIPSEND\r\n", ">", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
     if (ret != 0) {
         DebugPrintf("[FAIL] CIPSEND failed\r\n");
-        return -1;
+        goto cleanup;
     }
     DebugPrintf("[OK] Ready to send HTTP request\r\n");
     
@@ -432,7 +444,7 @@ int Get_Weather(void)
     ClearRxBuffer();
     if (HAL_UART_Receive_DMA(&huart2, (uint8_t *)g_uart2_rx_buffer, RX_BUFFER_SIZE) != HAL_OK) {
         DebugPrintf("[ERR] UART2 DMA receive start failed for HTTP response\r\n");
-        return -1;
+        goto cleanup;
     }
     vTaskDelay(pdMS_TO_TICKS(3000));  // 等待 3 秒确保完整 HTTP 响应到达（含 header + JSON body）
     
@@ -459,7 +471,7 @@ int Get_Weather(void)
             char *end_quote = strchr(text_pos, '"');
             if (end_quote == NULL) {
                 DebugPrintf("[ERR] Malformed JSON: missing end quote\r\n");
-                return -1;
+                goto cleanup;
             }
             
             // 计算天气字符串长度
@@ -511,7 +523,230 @@ int Get_Weather(void)
     }
     
     DebugPrintf("\n========== Get Weather Success ==========\r\n");
+    ret = 0;
+
+cleanup:
+    ESP8266_ExitTransparentMode();
+
+    ClearRxBuffer();
+    ESP8266_SendCmd("AT+CIPMODE=0\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
+    ClearRxBuffer();
+    ESP8266_SendCmd("AT+CIPCLOSE\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
+
+    return ret;
+}
+
+static int ESP8266_ParseServerTime(const char *buf, uint64_t *server_time_ms)
+{
+    const char *pos = NULL;
+    if (buf == NULL || server_time_ms == NULL) {
+        return -1;
+    }
+
+    pos = strstr(buf, "\"server_time\"");
+    if (pos == NULL) {
+        return -1;
+    }
+
+    pos = strchr(pos, ':');
+    if (pos == NULL) {
+        return -1;
+    }
+    pos++;
+
+    while (*pos == ' ' || *pos == '\"' || *pos == '\'' || *pos == '\t') {
+        pos++;
+    }
+
+    uint64_t value = 0;
+    uint32_t digits = 0;
+    while (*pos >= '0' && *pos <= '9' && digits < 18) {
+        value = value * 10 + (uint64_t)(*pos - '0');
+        pos++;
+        digits++;
+    }
+
+    if (digits == 0) {
+        return -1;
+    }
+
+    *server_time_ms = value;
     return 0;
+}
+
+static int ESP8266_SetRtcFromUnix(uint32_t utc_seconds)
+{
+    uint32_t seconds = utc_seconds + BEIJING_OFFSET_SECONDS;
+    uint32_t days = seconds / 86400U;
+    uint32_t sec_of_day = seconds % 86400U;
+
+    uint32_t hour = sec_of_day / 3600U;
+    uint32_t minute = (sec_of_day % 3600U) / 60U;
+    uint32_t second = sec_of_day % 60U;
+
+    int64_t z = (int64_t)days + 719468;
+    int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    int64_t doe = z - era * 146097;
+    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int64_t y = yoe + era * 400;
+    int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int64_t mp = (5 * doy + 2) / 153;
+    int64_t d = doy - (153 * mp + 2) / 5 + 1;
+    int64_t m = mp + (mp < 10 ? 3 : -9);
+    y += (m <= 2);
+
+    RTC_TimeTypeDef time = {0};
+    RTC_DateTypeDef date = {0};
+
+    time.Hours = (uint8_t)hour;
+    time.Minutes = (uint8_t)minute;
+    time.Seconds = (uint8_t)second;
+
+    date.Year = (uint8_t)(y - 2000);
+    date.Month = (uint8_t)m;
+    date.Date = (uint8_t)d;
+    date.WeekDay = (uint8_t)(((days + 4) % 7 + 1));
+
+    if (HAL_RTC_SetTime(&hrtc, &time, RTC_FORMAT_BIN) != HAL_OK) {
+        DebugPrintf("[ERR] HAL_RTC_SetTime failed\r\n");
+        return -1;
+    }
+    if (HAL_RTC_SetDate(&hrtc, &date, RTC_FORMAT_BIN) != HAL_OK) {
+        DebugPrintf("[ERR] HAL_RTC_SetDate failed\r\n");
+        return -1;
+    }
+
+    HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR2, date.Year);
+    HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR3, date.Month);
+    HAL_RTCEx_BKUPWrite(&hrtc, RTC_BKP_DR4, date.Date);
+
+    return 0;
+}
+
+static void ESP8266_ExitTransparentMode(void)
+{
+    ClearRxBuffer();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    HAL_UART_Transmit(&huart2, (uint8_t *)"+++", 3, 1000);
+    DebugPrintf("[TX] +++\r\n");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    ClearRxBuffer();
+    ESP8266_SendCmd("AT\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
+}
+
+int ESP8266_GetTime(void)
+{
+    int ret = -1;
+    uint64_t server_time_ms = 0;
+
+    DebugPrintf("\n========== Get Network Time ==========\r\n");
+
+    ClearRxBuffer();
+    if (ESP8266_SendCmd("AT+CWJAP?\r\n", "OK", 5000, esp8266_rx_buffer, RX_BUFFER_SIZE) == 0) {
+        if (strstr(esp8266_rx_buffer, "No AP") != NULL || strstr(esp8266_rx_buffer, "+CWJAP:") == NULL) {
+            g_wifi_connected = 0;
+            DebugPrintf("[WARN] WiFi disconnected before time sync\r\n");
+            goto cleanup_time;
+        }
+        g_wifi_connected = 1;
+    } else {
+        g_wifi_connected = 0;
+        DebugPrintf("[WARN] WiFi probe failed before time sync\r\n");
+        goto cleanup_time;
+    }
+
+    ClearRxBuffer();
+    ESP8266_SendCmd("AT+CIPMODE=0\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    ClearRxBuffer();
+    ESP8266_SendCmd("AT+CIPCLOSE\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    ClearRxBuffer();
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    DebugPrintf("[Step 1] Connecting to %s:80...\r\n", TIME_HOST);
+    ret = ESP8266_SendCmd("AT+CIPSTART=\"TCP\",\"" TIME_HOST "\",80\r\n", "CONNECT", 6000, esp8266_rx_buffer, RX_BUFFER_SIZE);
+    if (ret != 0) {
+        DebugPrintf("[WARN] AT+CIPSTART did not return CONNECT, checking for OK...\r\n");
+        ClearRxBuffer();
+        vTaskDelay(pdMS_TO_TICKS(200));
+        ret = ESP8266_SendCmd("AT+CIPSTART=\"TCP\",\"" TIME_HOST "\",80\r\n", "OK", 6000, esp8266_rx_buffer, RX_BUFFER_SIZE);
+        if (ret != 0) {
+            DebugPrintf("[FAIL] TCP connection to time server failed\r\n");
+            goto cleanup_time;
+        }
+    }
+    DebugPrintf("[OK] TCP connected\r\n");
+
+    ClearRxBuffer();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (ESP8266_SendCmd("AT+CIPMODE=1\r\n", "OK", 10000, esp8266_rx_buffer, RX_BUFFER_SIZE) != 0) {
+        DebugPrintf("[FAIL] CIPMODE=1 failed\r\n");
+        goto cleanup_time;
+    }
+    DebugPrintf("[OK] Transparent mode enabled\r\n");
+
+    ClearRxBuffer();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (ESP8266_SendCmd("AT+CIPSEND\r\n", ">", 10000, esp8266_rx_buffer, RX_BUFFER_SIZE) != 0) {
+        DebugPrintf("[FAIL] CIPSEND failed\r\n");
+        goto cleanup_time;
+    }
+    DebugPrintf("[OK] Ready to send network time request\r\n");
+
+    HAL_UART_Transmit(&huart2, (uint8_t *)TIME_REQUEST_TEMPLATE, strlen(TIME_REQUEST_TEMPLATE), 1000);
+    DebugPrintf("[TX] Time HTTP request sent\r\n");
+
+    ClearRxBuffer();
+    if (HAL_UART_Receive_DMA(&huart2, (uint8_t *)g_uart2_rx_buffer, RX_BUFFER_SIZE) != HAL_OK) {
+        DebugPrintf("[ERR] UART2 DMA receive start failed for time response\r\n");
+        goto cleanup_time;
+    }
+
+    uint32_t receive_start = xTaskGetTickCount();
+    while (xTaskGetTickCount() - receive_start < pdMS_TO_TICKS(10000)) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        if (strstr((const char *)g_uart2_rx_buffer, "server_time") != NULL) {
+            break;
+        }
+    }
+
+    uint16_t rx_len = GetUart2DmaRxLen();
+    HAL_UART_DMAStop(&huart2);
+
+    if (rx_len == 0) {
+        DebugPrintf("[WARN] No time response received\r\n");
+        goto cleanup_time;
+    }
+    if (rx_len >= RX_BUFFER_SIZE) {
+        rx_len = RX_BUFFER_SIZE - 1;
+    }
+    memcpy(esp8266_rx_buffer, (const void *)g_uart2_rx_buffer, rx_len);
+    esp8266_rx_buffer[rx_len] = '\0';
+    DebugPrintf("[RX] Time response received (%d bytes)\r\n", rx_len);
+
+    if (ESP8266_ParseServerTime(esp8266_rx_buffer, &server_time_ms) != 0) {
+        DebugPrintf("[FAIL] server_time parse failed\r\n");
+        goto cleanup_time;
+    }
+
+    uint32_t utc_seconds = (uint32_t)(server_time_ms / 1000ULL);
+    if (ESP8266_SetRtcFromUnix(utc_seconds) != 0) {
+        DebugPrintf("[FAIL] RTC update failed\r\n");
+        goto cleanup_time;
+    }
+
+    DebugPrintf("[OK] Network time synchronized: %llu ms\r\n", server_time_ms);
+    ret = 0;
+
+cleanup_time:
+    ESP8266_ExitTransparentMode();
+    ClearRxBuffer();
+    ESP8266_SendCmd("AT+CIPMODE=0\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
+    ClearRxBuffer();
+    ESP8266_SendCmd("AT+CIPCLOSE\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
+
+    return ret;
 }
 
 /**

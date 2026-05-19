@@ -63,7 +63,7 @@ static void Voice_Play_Number(int num)
         } else {
             Voice_Send_Index(V_NUM_BASE + (num - 1));
         }
-        HAL_Delay(800);
+        osDelay(800);
     } else {
         int tens = num / 10;
         int units = num % 10;
@@ -72,10 +72,10 @@ static void Voice_Play_Number(int num)
         } else {
             Voice_Send_Index(V_TEN_BASE + (tens - 2));
         }
-        HAL_Delay(800);
+        osDelay(800);
         if (units != 0) {
             Voice_Send_Index(V_NUM_BASE + (units - 1));
-            HAL_Delay(800);
+            osDelay(800);
         }
     }
 }
@@ -90,13 +90,13 @@ static void Voice_Report_Temp(void)
     }
 
     Voice_Send_Index(V_PREFIX_TEMP);
-    HAL_Delay(1200);
+    osDelay(1200);
     Voice_Play_Number(integer_part);
     Voice_Send_Index(V_POINT);
-    HAL_Delay(800);
+    osDelay(800);
     Voice_Play_Number(decimal_part);
     Voice_Send_Index(V_UNIT_CEL);
-    HAL_Delay(800);
+    osDelay(800);
 }
 
 static void Voice_Report_Humi(void)
@@ -109,12 +109,12 @@ static void Voice_Report_Humi(void)
     }
 
     Voice_Send_Index(V_PREFIX_HUMI);
-    HAL_Delay(1200);
+    osDelay(1200);
     Voice_Send_Index(V_UNIT_PER);
-    HAL_Delay(1000);
+    osDelay(1000);
     Voice_Play_Number(integer_part);
     Voice_Send_Index(V_POINT);
-    HAL_Delay(800);
+    osDelay(800);
     Voice_Play_Number(decimal_part);
 }
 
@@ -153,9 +153,14 @@ bool Voice_WaitForPlaybackComplete(uint32_t timeout_ms)
 
 void Voice_PlayStartup(void)
 {
-    voice_is_playing = true;
-    voice_play_start_tick = HAL_GetTick();
-    Voice_Send_Index(V_STARTUP);
+    if (voice_queue != NULL) {
+        uint8_t cmd = VOICE_CMD_STARTUP;
+        osMessageQueuePut(voice_queue, &cmd, 0, 0);
+    } else {
+        voice_is_playing = true;
+        voice_play_start_tick = HAL_GetTick();
+        Voice_Send_Index(V_STARTUP);
+    }
 }
 
 void Voice_Init(void)
@@ -170,7 +175,7 @@ void Voice_Init(void)
     memset(fb_buf, 0, sizeof(fb_buf));
 
     Voice_SetVolume(15);
-    HAL_Delay(200);
+    osDelay(200);
     HAL_UART_Receive_IT(&huart5, &aRxBuffer5, 1);
     HAL_UART_Receive_IT(&huart4, &aRxBuffer4, 1);
 }
@@ -196,6 +201,11 @@ void Voice_ProcessCommand(uint8_t cmd)
         voice_is_playing = true;
         voice_play_start_tick = HAL_GetTick();
         Voice_Report_Humi();
+        break;
+    case VOICE_CMD_STARTUP:
+        voice_is_playing = true;
+        voice_play_start_tick = HAL_GetTick();
+        Voice_Send_Index(V_STARTUP);
         break;
     default:
         break;

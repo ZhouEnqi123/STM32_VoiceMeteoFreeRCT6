@@ -242,7 +242,8 @@ void StartInitTask(void *argument)
   vTaskResume(DisplayTaskHandle);
   vTaskResume(LinkTaskHandle);
 
-  // 开机时播放启动音频，但不阻塞 OLED 点亮
+  // 给语音模块一点启动稳定时间，再播放开机音频
+  osDelay(500);
   Voice_PlayStartup();
   
   // 打印复位来源，便于诊断是否发生了 MCU 重启/看门狗
@@ -261,11 +262,6 @@ void StartInitTask(void *argument)
 
   // ESP 初始化将在 LinkTask 中异步进行，确保显示和传感器先启动
   DebugPrintf("\r\n\n[INIT] Deferring ESP8266 initialization to LinkTask\r\n");
-
-  // 启动显示、传感器和 LinkTask，后者负责从 AT 检测到 WiFi 连接的完整流程
-  vTaskResume(SensorTaskHandle);
-  vTaskResume(DisplayTaskHandle);
-  vTaskResume(LinkTaskHandle);
 
   // 初始化任务完成，删除自己
   vTaskDelete(NULL);
@@ -419,38 +415,39 @@ void StartLinkTask(void *argument)
     // 获取当前任务时间
     current_time = xTaskGetTickCount();
 
-    // 只有在 ESP 初始化成功后，才尝试获取天气
-    if (esp_init_done) {
-      if ((current_time - last_update_time) >= pdMS_TO_TICKS(WEATHER_UPDATE_PERIOD_MS) ||
-          last_update_time == 0)  // 第一次执行
-      {
-        DebugPrintf("\r\n[LinkTask] Starting weather update...\r\n");
-        
-        // 调用 ESP8266 获取天气函数
-        if (Get_Weather() == 0) {
-          // 获取成功，发送天气更新事件给 DisplayTask
-          DebugPrintf("[LinkTask] Weather updated: %s\r\n", g_weather.weather_text);
-          osEventFlagsSet(DisplayEventsHandle, EVENT_WEATHER_UPDATE);
-          
-          // 更新上次更新时间
-          last_update_time = current_time;
-        } else {
-          DebugPrintf("[LinkTask] Weather update failed, will retry next cycle\r\n");
-          // 失败不更新时间，等待下一轮尝试（仍然每10分钟重试）
-          last_update_time = current_time;
-        }
-      }
-    } else {
-      // 如果还未初始化成功，降低重试频率（每 60 秒重试一次），避免大量打印阻塞
+    // 如果 ESP 尚未初始化或 WiFi 未连接，需要重新启动初始化/重连流程
+    if (!esp_init_done || !g_wifi_connected) {
       if (ESP8266_Init() == 0) {
         esp_init_done = 1;
-        DebugPrintf("[LinkTask] ESP8266 initialized on delayed retry\r\n");
+        DebugPrintf("[LinkTask] ESP8266 initialized and WiFi ready\r\n");
       } else {
-        // 仅在失败时打印一次信息，等待更长时间再试
-        DebugPrintf("[LinkTask] ESP still not ready, will retry after delay\r\n");
+        DebugPrintf("[LinkTask] ESP8266 still not ready, retry after delay\r\n");
         osDelay(pdMS_TO_TICKS(60000));
         continue;
       }
+    }
+
+    if ((current_time - last_update_time) >= pdMS_TO_TICKS(WEATHER_UPDATE_PERIOD_MS) ||
+        last_update_time == 0)  // 第一次执行
+    {
+      DebugPrintf("\r\n[LinkTask] Starting weather update...\r\n");
+      int weather_ok = (Get_Weather() == 0);
+      if (weather_ok) {
+        DebugPrintf("[LinkTask] Weather updated: %s\r\n", g_weather.weather_text);
+        osEventFlagsSet(DisplayEventsHandle, EVENT_WEATHER_UPDATE);
+      } else {
+        DebugPrintf("[LinkTask] Weather update failed, will retry next cycle\r\n");
+      }
+
+      if (g_wifi_connected) {
+        if (ESP8266_GetTime() == 0) {
+          DebugPrintf("[LinkTask] Network time synchronized\r\n");
+        } else {
+          DebugPrintf("[LinkTask] Network time sync failed\r\n");
+        }
+      }
+
+      last_update_time = current_time;
     }
 
     // 每秒检查一次是否需要更新

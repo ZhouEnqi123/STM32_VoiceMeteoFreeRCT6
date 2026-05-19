@@ -33,6 +33,9 @@ extern "C" {
 #define SENIVERSE_KEY   "SVTaGHkZSNZIz6BVX"
 #define CITY            "jinhua"
 
+#define TIME_HOST       "api.pinduoduo.com"
+#define TIME_PATH       "/api/server/_stm"
+
 /* ==================== 宏定义 - 通信参数 ==================== */
 #define RX_BUFFER_SIZE  1024        // 接收缓冲区大小（增加以容纳完整 HTTP 响应）
 #define TX_BUFFER_SIZE  256         // 发送缓冲区大小
@@ -105,6 +108,7 @@ int ESP8266_Init(void);
  *       - LinkQueue 中放置 flag=1 表示天气已更新，供 DisplayTask 使用
  */
 int Get_Weather(void);
+int ESP8266_GetTime(void);
 
 /**
  * @brief 发送 AT 命令并接收响应

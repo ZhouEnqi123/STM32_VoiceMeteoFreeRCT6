@@ -21,6 +21,7 @@ extern "C" {
 #define VOICE_CMD_WAKEUP  0x00
 #define VOICE_CMD_TEMP    0x01
 #define VOICE_CMD_HUMI    0x02
+#define VOICE_CMD_STARTUP 0x03
 
 void Voice_Init(void);
 void Voice_PlayStartup(void);
