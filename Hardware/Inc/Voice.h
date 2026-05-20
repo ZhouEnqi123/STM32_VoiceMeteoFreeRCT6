@@ -22,10 +22,12 @@ extern "C" {
 #define VOICE_CMD_TEMP    0x01
 #define VOICE_CMD_HUMI    0x02
 #define VOICE_CMD_STARTUP 0x03
+#define VOICE_CMD_TIME    0x04
 
 void Voice_Init(void);
 void Voice_PlayStartup(void);
 void Voice_UpdateSensorData(float temperature, float humidity);
+void Voice_SetVolumeLevel(uint8_t volume);
 bool Voice_WaitForPlaybackComplete(uint32_t timeout_ms);
 bool Voice_IsPlaying(void);
 void Voice_TaskLoop(void);

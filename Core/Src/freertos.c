@@ -29,6 +29,7 @@
 #include "font.h"
 #include "aht20.h"
 #include "esp8266.h"
+#include "Comm.h"
 #include "Voice.h"
 #include <stdio.h>
 #include <string.h>
@@ -63,6 +64,13 @@ extern RTC_DateTypeDef Date;
 extern RTC_HandleTypeDef hrtc;
 // ESP 初始化状态（0 = 未初始化/未就绪, 1 = 已初始化就绪）
 volatile int esp_init_done = 0;
+// OneNET 上报前需要先完成天气与网络时间同步
+volatile uint8_t g_comm_ready_to_publish = 0;
+// 天气/时间/云上传准备阶段标志，避免 CommTask 重复刷等待日志
+volatile uint8_t g_comm_upload_preparing = 0;
+// 供 CommTask 使用的最近一次有效传感器值（避免队列多消费者导致读不到）
+volatile float g_latest_temperature = 0.0f;
+volatile float g_latest_humidity = 0.0f;
 // IWDG 看门狗喂养计数器
 static uint32_t iwdg_feed_counter = 0;
 /* USER CODE END Variables */
@@ -101,6 +109,13 @@ const osThreadAttr_t VoiceTask_attributes = {
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityBelowNormal,
 };
+/* Definitions for CommTask */
+osThreadId_t CommTaskHandle;
+const osThreadAttr_t CommTask_attributes = {
+  .name = "CommTask",
+  .stack_size = 1024 * 4,
+  .priority = (osPriority_t) osPriorityNormal2,
+};
 /* Definitions for SensorQueue */
 osMessageQueueId_t SensorQueueHandle;
 const osMessageQueueAttr_t SensorQueue_attributes = {
@@ -126,6 +141,11 @@ osEventFlagsId_t DisplayEventsHandle;
 const osEventFlagsAttr_t DisplayEvents_attributes = {
   .name = "DisplayEvents"
 };
+/* Definitions for CommEvents */
+osEventFlagsId_t CommEventsHandle;
+const osEventFlagsAttr_t CommEvents_attributes = {
+  .name = "CommEvents"
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -137,6 +157,7 @@ void StartSensorTask(void *argument);
 void StartDisplayTask(void *argument);
 void StartLinkTask(void *argument);
 void StartVoiceTask(void *argument);
+void StartCommTask(void *argument);
 void ClockTimerCallback(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -197,6 +218,9 @@ void MX_FREERTOS_Init(void) {
   /* creation of VoiceTask */
   VoiceTaskHandle = osThreadNew(StartVoiceTask, NULL, &VoiceTask_attributes);
 
+  /* creation of CommTask */
+  CommTaskHandle = osThreadNew(StartCommTask, NULL, &CommTask_attributes);
+
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
   /* USER CODE END RTOS_THREADS */
@@ -205,9 +229,15 @@ void MX_FREERTOS_Init(void) {
   /* creation of DisplayEvents */
   DisplayEventsHandle = osEventFlagsNew(&DisplayEvents_attributes);
 
+  /* creation of CommEvents */
+  CommEventsHandle = osEventFlagsNew(&CommEvents_attributes);
+
   /* USER CODE BEGIN RTOS_EVENTS */
   /* add events, ... */
   /* USER CODE END RTOS_EVENTS */
+
+  /* Make sure the ESP8266 mutex exists before any task uses AT commands */
+  ESP8266_InitLock();
 
 }
 
@@ -288,6 +318,8 @@ void StartSensorTask(void *argument)
 
     sensor_data.temperature = AHT20_Temperature();
     sensor_data.humidity = AHT20_Humidity();
+    g_latest_temperature = sensor_data.temperature;
+    g_latest_humidity = sensor_data.humidity;
     Voice_UpdateSensorData(sensor_data.temperature, sensor_data.humidity);
 
     osMessageQueuePut(SensorQueueHandle, &sensor_data, 0, 0);
@@ -431,6 +463,7 @@ void StartLinkTask(void *argument)
         last_update_time == 0)  // 第一次执行
     {
       DebugPrintf("\r\n[LinkTask] Starting weather update...\r\n");
+      g_comm_upload_preparing = 1;
       int weather_ok = (Get_Weather() == 0);
       if (weather_ok) {
         DebugPrintf("[LinkTask] Weather updated: %s\r\n", g_weather.weather_text);
@@ -439,13 +472,27 @@ void StartLinkTask(void *argument)
         DebugPrintf("[LinkTask] Weather update failed, will retry next cycle\r\n");
       }
 
+      int time_ok = 0;
       if (g_wifi_connected) {
         if (ESP8266_GetTime() == 0) {
           DebugPrintf("[LinkTask] Network time synchronized\r\n");
+          time_ok = 1;
         } else {
           DebugPrintf("[LinkTask] Network time sync failed\r\n");
         }
       }
+
+      if (weather_ok && time_ok) {
+        DebugPrintf("[LinkTask] Weather/time ready, enabling cloud upload\r\n");
+        osDelay(pdMS_TO_TICKS(1000));
+        if (ESP8266_ResetAndReinit() == 0) {
+          g_comm_ready_to_publish = 1;
+        } else {
+          DebugPrintf("[LinkTask] ESP8266 reset/reinit failed, defer cloud upload\r\n");
+        }
+      }
+
+      g_comm_upload_preparing = 0;
 
       last_update_time = current_time;
     }
@@ -468,6 +515,20 @@ void StartVoiceTask(void *argument)
   /* USER CODE BEGIN StartVoiceTask */
   Voice_TaskLoop();
   /* USER CODE END StartVoiceTask */
+}
+
+/* USER CODE BEGIN Header_StartCommTask */
+/**
+* @brief Function implementing the CommTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartCommTask */
+void StartCommTask(void *argument)
+{
+  /* USER CODE BEGIN StartCommTask */
+  Comm_TaskLoop();
+  /* USER CODE END StartCommTask */
 }
 
 /* ClockTimerCallback function */

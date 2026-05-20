@@ -21,6 +21,7 @@
 #include "rtc.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "cmsis_os.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -52,6 +53,8 @@ volatile char g_uart2_rx_buffer[RX_BUFFER_SIZE] = {0};
 static char esp8266_rx_buffer[RX_BUFFER_SIZE] = {0};
 static char esp8266_cmd_buffer[256] = {0};
 
+static osMutexId_t esp8266_mutex = NULL;
+
 /* ==================== 私有函数声明 ==================== */
 
 /**
@@ -61,6 +64,9 @@ static void ClearRxBuffer(void);
 static int ESP8266_ParseServerTime(const char *buf, uint64_t *server_time_ms);
 static int ESP8266_SetRtcFromUnix(uint32_t utc_seconds);
 static void ESP8266_ExitTransparentMode(void);
+static void ESP8266_QuickTransportCleanup(void);
+static int ESP8266_MutexLock(uint32_t timeout_ms);
+static void ESP8266_MutexUnlock(void);
 
 /* ==================== UART2 缓冲区管理 ==================== */
 
@@ -111,6 +117,11 @@ int ESP8266_SendCmd(const char *cmd, const char *response,
         DebugPrintf("[ERR] ESP8266_SendCmd: Invalid parameter\r\n");
         return -1;
     }
+
+    if (ESP8266_MutexLock(2000) != 0) {
+        DebugPrintf("[ERR] ESP8266_SendCmd: failed to acquire mutex\r\n");
+        return -1;
+    }
     
     // 1. 清空接收缓冲区
     ClearRxBuffer();
@@ -121,6 +132,7 @@ int ESP8266_SendCmd(const char *cmd, const char *response,
     // 3. 启动 DMA 接收并发送命令到 ESP8266 (UART2)
     if (HAL_UART_Receive_DMA(&huart2, (uint8_t *)g_uart2_rx_buffer, RX_BUFFER_SIZE) != HAL_OK) {
         DebugPrintf("[ERR] UART2 DMA receive start failed\r\n");
+        ESP8266_MutexUnlock();
         return -1;
     }
     HAL_UART_Transmit(&huart2, (uint8_t *)cmd, strlen(cmd), 1000);
@@ -129,7 +141,7 @@ int ESP8266_SendCmd(const char *cmd, const char *response,
     uint32_t start_ticks = xTaskGetTickCount();
     uint32_t timeout_ticks = (timeout_ms / portTICK_PERIOD_MS);
     uint16_t last_rx_len = 0;
-    uint32_t last_data_ticks = start_ticks;
+    uint8_t seen_error = 0;
     
     // 先等待100ms让 ESP8266 开始响应
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -142,8 +154,6 @@ int ESP8266_SendCmd(const char *cmd, const char *response,
         // 检查是否有新数据到达
         uint16_t current_len = GetUart2DmaRxLen();
         if (current_len > last_rx_len) {
-            last_data_ticks = xTaskGetTickCount();
-            
             taskENTER_CRITICAL();
             uint16_t copy_len = (current_len > rx_size - 1) ? (rx_size - 1) : current_len;
             memcpy(rx_buf, (const void *)g_uart2_rx_buffer, copy_len);
@@ -157,37 +167,33 @@ int ESP8266_SendCmd(const char *cmd, const char *response,
             // 查找期望的响应字符串
             if (strstr(rx_buf, response) != NULL) {
                 HAL_UART_DMAStop(&huart2);
+                ESP8266_MutexUnlock();
                 return 0;  // 成功找到响应
             }
             
-            // 检查是否有错误响应
+            // ERROR 可能是前序命令残留，先记录并继续等待目标响应，避免误判
             if (strstr(rx_buf, "ERROR") != NULL && strcmp(response, "OK") == 0) {
-                DebugPrintf("[ERR] Received ERROR response\r\n");
-                HAL_UART_DMAStop(&huart2);
-                return -1;
+                seen_error = 1;
             }
             
             // 检查缓冲区是否快满
             if (current_len >= RX_BUFFER_SIZE - 1) {
                 DebugPrintf("[WARN] RX buffer overflow\r\n");
                 HAL_UART_DMAStop(&huart2);
+                ESP8266_MutexUnlock();
                 return -1;
             }
         }
         
-        // 额外的超时机制：如果在固定时间内没有新数据到达，可能连接已断开
-        if (xTaskGetTickCount() - last_data_ticks > pdMS_TO_TICKS(2000)) {
-            if (last_rx_len == 0) {
-                // 一直没有收到任何数据
-                DebugPrintf("[TIMEOUT] No data received for 2s\r\n");
-                HAL_UART_DMAStop(&huart2);
-                return -1;
-            }
-        }
+        // 不做固定 2s 的早超时，完整等待 timeout_ms，避免慢响应命令被误判失败
     }
     
+    if (seen_error) {
+        DebugPrintf("[ERR] Received ERROR response\r\n");
+    }
     DebugPrintf("[TIMEOUT] Command timeout after %lu ms\r\n", timeout_ms);
     HAL_UART_DMAStop(&huart2);
+    ESP8266_MutexUnlock();
     return -1;  // 超时
 }
 
@@ -306,6 +312,34 @@ int ESP8266_Init(void)
     return 0;
 }
 
+int ESP8266_ResetAndReinit(void)
+{
+    DebugPrintf("[ESP8266] Resetting module before cloud upload\r\n");
+
+    ClearRxBuffer();
+    HAL_UART_Transmit(&huart2, (uint8_t *)"AT+RST\r\n", strlen("AT+RST\r\n"), 500);
+    vTaskDelay(pdMS_TO_TICKS(8000));
+
+    if (ESP8266_Init() != 0) {
+        DebugPrintf("[ESP8266] Reset and reinit failed\r\n");
+        return -1;
+    }
+
+    DebugPrintf("[ESP8266] Reset and reinit success\r\n");
+    return 0;
+}
+
+static void ESP8266_QuickTransportCleanup(void)
+{
+    ClearRxBuffer();
+    HAL_UART_Transmit(&huart2, (uint8_t *)"AT+CIPMODE=0\r\n", strlen("AT+CIPMODE=0\r\n"), 500);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    ClearRxBuffer();
+    HAL_UART_Transmit(&huart2, (uint8_t *)"AT+CIPCLOSE\r\n", strlen("AT+CIPCLOSE\r\n"), 500);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    ClearRxBuffer();
+}
+
 /* ==================== 获取天气函数 ==================== */
 
 /**
@@ -364,7 +398,9 @@ int Get_Weather(void)
     
     // 尝试关闭任何打开的连接（可能失败，但没关系）
     ClearRxBuffer();
-    ESP8266_SendCmd("AT+CIPCLOSE\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
+    if (ESP8266_SendCmd("AT+CIPCLOSE\r\n", "CLOSED", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE) != 0) {
+        ESP8266_SendCmd("AT+CIPCLOSE\r\n", "ERROR", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
+    }
     vTaskDelay(pdMS_TO_TICKS(200));  // 增加延迟
     
     // 额外清理：再次禁用透传模式，确保模块处于命令模式
@@ -524,6 +560,7 @@ int Get_Weather(void)
     
     DebugPrintf("\n========== Get Weather Success ==========\r\n");
     ret = 0;
+    goto done;
 
 cleanup:
     ESP8266_ExitTransparentMode();
@@ -533,6 +570,7 @@ cleanup:
     ClearRxBuffer();
     ESP8266_SendCmd("AT+CIPCLOSE\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
 
+done:
     return ret;
 }
 
@@ -634,6 +672,87 @@ static void ESP8266_ExitTransparentMode(void)
     ESP8266_SendCmd("AT\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
 }
 
+int ESP8266_InitLock(void)
+{
+    if (esp8266_mutex != NULL) {
+        return 0;
+    }
+
+    const osMutexAttr_t attr = {
+        .name = "ESP8266_Mutex"
+    };
+    esp8266_mutex = osMutexNew(&attr);
+    if (esp8266_mutex == NULL) {
+        DebugPrintf("[ERR] ESP8266 InitLock failed\r\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int ESP8266_MutexLock(uint32_t timeout_ms)
+{
+    if (esp8266_mutex == NULL) {
+        return -1;
+    }
+    return (osMutexAcquire(esp8266_mutex, pdMS_TO_TICKS(timeout_ms)) == osOK) ? 0 : -1;
+}
+
+static void ESP8266_MutexUnlock(void)
+{
+    if (esp8266_mutex != NULL) {
+        osMutexRelease(esp8266_mutex);
+    }
+}
+
+int ESP8266_WaitResponse(const char *wait_str, uint32_t timeout_ms, char *rx_buf, uint16_t rx_size)
+{
+    if (wait_str == NULL || rx_buf == NULL) {
+        DebugPrintf("[ERR] ESP8266_WaitResponse: invalid parameters\r\n");
+        return -1;
+    }
+
+    if (ESP8266_MutexLock(2000) != 0) {
+        DebugPrintf("[ERR] ESP8266_WaitResponse: failed to acquire mutex\r\n");
+        return -1;
+    }
+
+    ClearRxBuffer();
+    if (HAL_UART_Receive_DMA(&huart2, (uint8_t *)g_uart2_rx_buffer, RX_BUFFER_SIZE) != HAL_OK) {
+        DebugPrintf("[ERR] UART2 DMA receive start failed\r\n");
+        ESP8266_MutexUnlock();
+        return -1;
+    }
+
+    uint32_t start_ticks = xTaskGetTickCount();
+    uint32_t timeout_ticks = (timeout_ms / portTICK_PERIOD_MS);
+    uint16_t last_rx_len = 0;
+
+    while (xTaskGetTickCount() - start_ticks < timeout_ticks) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+
+        uint16_t current_len = GetUart2DmaRxLen();
+        if (current_len > last_rx_len) {
+            taskENTER_CRITICAL();
+            uint16_t copy_len = (current_len > rx_size - 1) ? (rx_size - 1) : current_len;
+            memcpy(rx_buf, (const void *)g_uart2_rx_buffer, copy_len);
+            taskEXIT_CRITICAL();
+            rx_buf[copy_len] = '\0';
+            last_rx_len = current_len;
+
+            DebugPrintf("[RX-WAIT] %s\r\n", rx_buf);
+            if (strstr(rx_buf, wait_str) != NULL) {
+                HAL_UART_DMAStop(&huart2);
+                ESP8266_MutexUnlock();
+                return 0;
+            }
+        }
+    }
+
+    HAL_UART_DMAStop(&huart2);
+    ESP8266_MutexUnlock();
+    return -1;
+}
+
 int ESP8266_GetTime(void)
 {
     int ret = -1;
@@ -655,14 +774,7 @@ int ESP8266_GetTime(void)
         goto cleanup_time;
     }
 
-    ClearRxBuffer();
-    ESP8266_SendCmd("AT+CIPMODE=0\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
-    vTaskDelay(pdMS_TO_TICKS(200));
-    ClearRxBuffer();
-    ESP8266_SendCmd("AT+CIPCLOSE\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
-    vTaskDelay(pdMS_TO_TICKS(200));
-    ClearRxBuffer();
-    vTaskDelay(pdMS_TO_TICKS(500));
+    ESP8266_QuickTransportCleanup();
 
     DebugPrintf("[Step 1] Connecting to %s:80...\r\n", TIME_HOST);
     ret = ESP8266_SendCmd("AT+CIPSTART=\"TCP\",\"" TIME_HOST "\",80\r\n", "CONNECT", 6000, esp8266_rx_buffer, RX_BUFFER_SIZE);
@@ -736,15 +848,14 @@ int ESP8266_GetTime(void)
         goto cleanup_time;
     }
 
-    DebugPrintf("[OK] Network time synchronized: %llu ms\r\n", server_time_ms);
+    DebugPrintf("[OK] Network time synchronized: %lu s + %lu ms\r\n",
+                (unsigned long)(server_time_ms / 1000ULL),
+                (unsigned long)(server_time_ms % 1000ULL));
     ret = 0;
 
 cleanup_time:
     ESP8266_ExitTransparentMode();
-    ClearRxBuffer();
-    ESP8266_SendCmd("AT+CIPMODE=0\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
-    ClearRxBuffer();
-    ESP8266_SendCmd("AT+CIPCLOSE\r\n", "OK", CMD_TIMEOUT_MS, esp8266_rx_buffer, RX_BUFFER_SIZE);
+    ESP8266_QuickTransportCleanup();
 
     return ret;
 }

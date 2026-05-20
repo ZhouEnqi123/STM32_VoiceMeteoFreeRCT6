@@ -9,12 +9,15 @@
 
 #include "Voice.h"
 #include "usart.h"
+#include "rtc.h"
 #include <string.h>
 
 /* Voice audio indexes (对应 MY1680 存储音频顺序) */
 #define V_STARTUP      0x0001
 #define V_PREFIX_TEMP  0x0002
 #define V_PREFIX_HUMI  0x0003
+#define V_PREFIX_TIME   0x001B
+#define V_UNIT_MIN      0x001C
 #define V_UNIT_TEN     0x0004
 #define V_TEN_BASE     0x0005
 #define V_NUM_BASE     0x000D
@@ -23,6 +26,8 @@
 #define V_UNIT_PER     0x0018
 #define V_REPLY        0x0019
 #define V_POINT        0x001A
+
+#define VOICE_DEFAULT_VOLUME 8U
 
 /* Receiver buffers */
 static uint8_t aRxBuffer5 = 0;
@@ -37,6 +42,7 @@ static osMessageQueueId_t voice_queue = NULL;
 
 static float voice_temperature = 25.6f;
 static float voice_humidity = 72.3f;
+static uint8_t voice_volume_level = VOICE_DEFAULT_VOLUME;
 
 static void Voice_Send_Index(uint16_t index)
 {
@@ -118,14 +124,35 @@ static void Voice_Report_Humi(void)
     Voice_Play_Number(decimal_part);
 }
 
-static void Voice_SetVolume(uint8_t volume)
+void Voice_SetVolumeLevel(uint8_t volume)
 {
     uint8_t cmd[6] = {0x7E, 0x04, 0x31, 0x0F, 0x3A, 0xEF};
     if (volume <= 15) {
+        voice_volume_level = volume;
         cmd[3] = 0x30 | (volume & 0x0F);
         cmd[4] = cmd[1] ^ cmd[2] ^ cmd[3];
     }
     HAL_UART_Transmit(&huart4, cmd, sizeof(cmd), 100);
+}
+
+static void Voice_Report_Time(void)
+{
+    RTC_TimeTypeDef rtc_time = {0};
+    RTC_DateTypeDef rtc_date = {0};
+
+    if (HAL_RTC_GetTime(&hrtc, &rtc_time, RTC_FORMAT_BIN) != HAL_OK ||
+        HAL_RTC_GetDate(&hrtc, &rtc_date, RTC_FORMAT_BIN) != HAL_OK) {
+        return;
+    }
+
+    Voice_Send_Index(V_PREFIX_TIME);
+    osDelay(1200);
+    Voice_Play_Number(rtc_time.Hours);
+    Voice_Send_Index(V_POINT);
+    osDelay(800);
+    Voice_Play_Number(rtc_time.Minutes);
+    Voice_Send_Index(V_UNIT_MIN);
+    osDelay(800);
 }
 
 void Voice_UpdateSensorData(float temperature, float humidity)
@@ -174,7 +201,7 @@ void Voice_Init(void)
     voice_play_start_tick = 0;
     memset(fb_buf, 0, sizeof(fb_buf));
 
-    Voice_SetVolume(15);
+    Voice_SetVolumeLevel(VOICE_DEFAULT_VOLUME);
     osDelay(200);
     HAL_UART_Receive_IT(&huart5, &aRxBuffer5, 1);
     HAL_UART_Receive_IT(&huart4, &aRxBuffer4, 1);
@@ -206,6 +233,11 @@ void Voice_ProcessCommand(uint8_t cmd)
         voice_is_playing = true;
         voice_play_start_tick = HAL_GetTick();
         Voice_Send_Index(V_STARTUP);
+        break;
+    case VOICE_CMD_TIME:
+        voice_is_playing = true;
+        voice_play_start_tick = HAL_GetTick();
+        Voice_Report_Time();
         break;
     default:
         break;

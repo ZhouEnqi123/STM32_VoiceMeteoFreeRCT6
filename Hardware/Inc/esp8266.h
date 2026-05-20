@@ -53,7 +53,7 @@ extern "C" {
  * 用于存储从 API 获取的天气信息
  */
 typedef struct {
-    char weather_text[16];          // 天气描述（如"晴"、"多云"等），最长15字符+\0
+    char weather_text[32];          // 天气描述（如"晴"、"多云"等），保留更完整的中文结果
 } NetWeather_t;
 
 /* ==================== 全局变量声明 ==================== */
@@ -80,6 +80,7 @@ extern volatile char g_uart2_rx_buffer[RX_BUFFER_SIZE];  // UART2接收缓冲区
  *       - ESP8266 已供电且可工作（3.3V 500mA+）
  */
 int ESP8266_Init(void);
+int ESP8266_ResetAndReinit(void);
 
 /**
  * @brief 获取网络天气信息
@@ -135,6 +136,9 @@ int ESP8266_GetTime(void);
  */
 int ESP8266_SendCmd(const char *cmd, const char *response, 
                     uint32_t timeout_ms, char *rx_buf, uint16_t rx_size);
+
+int ESP8266_InitLock(void);
+int ESP8266_WaitResponse(const char *wait_str, uint32_t timeout_ms, char *rx_buf, uint16_t rx_size);
 
 #ifdef __cplusplus
 }
