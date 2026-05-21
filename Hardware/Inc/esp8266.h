@@ -81,6 +81,7 @@ extern volatile char g_uart2_rx_buffer[RX_BUFFER_SIZE];  // UART2接收缓冲区
  */
 int ESP8266_Init(void);
 int ESP8266_ResetAndReinit(void);
+int ESP8266_GetRxDelta(char *buffer, uint16_t buffer_size, uint16_t *out_length);
 
 /**
  * @brief 获取网络天气信息
@@ -139,6 +140,7 @@ int ESP8266_SendCmd(const char *cmd, const char *response,
 
 int ESP8266_InitLock(void);
 int ESP8266_WaitResponse(const char *wait_str, uint32_t timeout_ms, char *rx_buf, uint16_t rx_size);
+int ESP8266_StartRxMonitor(void);
 
 #ifdef __cplusplus
 }

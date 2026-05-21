@@ -42,6 +42,7 @@ extern const Image tempImg;
 extern const Image humiImg;
 extern const Image ％Img;
 extern const Image NoWIFIImg;
+extern const Image AlarmImg;
 
 extern const Image WeatherSunnyImg;
 extern const Image WeatherPartlyCloudyImg;

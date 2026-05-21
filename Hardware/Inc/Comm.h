@@ -36,12 +36,14 @@ extern "C" {
 #define ONENET_PAYLOAD_SIZE       512
 
 extern volatile uint8_t g_comm_ready_to_publish;
+extern volatile uint8_t g_alarm_icon_visible;
 
 /* ==================== OneNET 主题字符串 ==================== */
 #define ONENET_TOPIC_FORMAT      "$sys/%s/%s/thing/property/post"
 #define ONENET_TOPIC_POST        "$sys/" ONENET_PRODUCT_ID "/" ONENET_DEVICE_ID "/thing/property/post"
 #define ONENET_TOPIC_PROPERTY_POST_REPLY "$sys/" ONENET_PRODUCT_ID "/" ONENET_DEVICE_ID "/thing/property/post/reply"
 #define ONENET_TOPIC_PROPERTY_SET       "$sys/" ONENET_PRODUCT_ID "/" ONENET_DEVICE_ID "/thing/property/set"
+#define ONENET_TOPIC_PROPERTY_SET_REPLY "$sys/" ONENET_PRODUCT_ID "/" ONENET_DEVICE_ID "/thing/property/set_reply"
 
 /* ==================== Function declarations ==================== */
 int Comm_Init(void);

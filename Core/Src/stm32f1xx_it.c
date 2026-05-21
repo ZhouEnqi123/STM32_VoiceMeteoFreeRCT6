@@ -61,6 +61,8 @@ extern UART_HandleTypeDef huart5;
 extern UART_HandleTypeDef huart2;
 extern TIM_HandleTypeDef htim4;
 
+extern void ESP8266_UART2_IdleCallback(void);
+
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -197,6 +199,10 @@ void TIM4_IRQHandler(void)
 void USART2_IRQHandler(void)
 {
   /* USER CODE BEGIN USART2_IRQn 0 */
+  if (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_IDLE) != RESET) {
+    __HAL_UART_CLEAR_IDLEFLAG(&huart2);
+    ESP8266_UART2_IdleCallback();
+  }
 
   /* USER CODE END USART2_IRQn 0 */
   HAL_UART_IRQHandler(&huart2);

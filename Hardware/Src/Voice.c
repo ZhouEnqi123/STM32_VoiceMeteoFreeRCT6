@@ -18,6 +18,7 @@
 #define V_PREFIX_HUMI  0x0003
 #define V_PREFIX_TIME   0x001B
 #define V_UNIT_MIN      0x001C
+#define V_ALARM         0x001D
 #define V_UNIT_TEN     0x0004
 #define V_TEN_BASE     0x0005
 #define V_NUM_BASE     0x000D
@@ -135,6 +136,18 @@ void Voice_SetVolumeLevel(uint8_t volume)
     HAL_UART_Transmit(&huart4, cmd, sizeof(cmd), 100);
 }
 
+void Voice_PlayAlarm(void)
+{
+    if (voice_queue != NULL) {
+        uint8_t cmd = VOICE_CMD_ALARM;
+        osMessageQueuePut(voice_queue, &cmd, 0, 0);
+    } else {
+        voice_is_playing = true;
+        voice_play_start_tick = HAL_GetTick();
+        Voice_Send_Index(V_ALARM);
+    }
+}
+
 static void Voice_Report_Time(void)
 {
     RTC_TimeTypeDef rtc_time = {0};
@@ -150,6 +163,10 @@ static void Voice_Report_Time(void)
     Voice_Play_Number(rtc_time.Hours);
     Voice_Send_Index(V_POINT);
     osDelay(800);
+    if (rtc_time.Minutes < 10) {
+        Voice_Send_Index(V_NUM_0);
+        osDelay(800);
+    }
     Voice_Play_Number(rtc_time.Minutes);
     Voice_Send_Index(V_UNIT_MIN);
     osDelay(800);
@@ -238,6 +255,11 @@ void Voice_ProcessCommand(uint8_t cmd)
         voice_is_playing = true;
         voice_play_start_tick = HAL_GetTick();
         Voice_Report_Time();
+        break;
+    case VOICE_CMD_ALARM:
+        voice_is_playing = true;
+        voice_play_start_tick = HAL_GetTick();
+        Voice_Send_Index(V_ALARM);
         break;
     default:
         break;

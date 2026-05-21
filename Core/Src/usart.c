@@ -144,6 +144,7 @@ void MX_USART2_UART_Init(void)
   {
     Error_Handler();
   }
+  __HAL_UART_ENABLE_IT(&huart2, UART_IT_IDLE);
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
@@ -273,7 +274,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     hdma_usart2_rx.Init.MemInc = DMA_MINC_ENABLE;
     hdma_usart2_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
     hdma_usart2_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-    hdma_usart2_rx.Init.Mode = DMA_NORMAL;
+    hdma_usart2_rx.Init.Mode = DMA_CIRCULAR;
     hdma_usart2_rx.Init.Priority = DMA_PRIORITY_MEDIUM;
     if (HAL_DMA_Init(&hdma_usart2_rx) != HAL_OK)
     {
@@ -418,6 +419,11 @@ void DebugPrintf(const char *format, ...)
     // 发送到 UART1（非阻塞，超时1秒）
     HAL_UART_Transmit(&huart1, (uint8_t *)debug_buffer, len, 100);
 }
+
+  void ESP8266_UART2_IdleCallback(void)
+  {
+    /* IDLE 中断已开启，数据实际由 DMA 环形缓冲供任务层增量读取。 */
+  }
 
 /**
  * @brief UART2 接收中断回调

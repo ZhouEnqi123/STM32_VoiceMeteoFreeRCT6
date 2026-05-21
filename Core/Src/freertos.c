@@ -174,6 +174,7 @@ void MX_FREERTOS_Init(void) {
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
+  ESP8266_InitLock();
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -235,9 +236,6 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN RTOS_EVENTS */
   /* add events, ... */
   /* USER CODE END RTOS_EVENTS */
-
-  /* Make sure the ESP8266 mutex exists before any task uses AT commands */
-  ESP8266_InitLock();
 
 }
 
@@ -378,6 +376,10 @@ void StartDisplayTask(void *argument)
       if (weather_icon != NULL) {
         OLED_DrawImage(0, 0, weather_icon, OLED_COLOR_NORMAL);
       }
+    }
+
+    if (g_alarm_icon_visible) {
+      OLED_DrawImage(112, 0, &AlarmImg, OLED_COLOR_NORMAL);
     }
 
     // ========== 中上部：显示日期 ==========

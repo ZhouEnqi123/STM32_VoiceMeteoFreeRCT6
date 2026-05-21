@@ -67,6 +67,7 @@ static void ESP8266_ExitTransparentMode(void);
 static void ESP8266_QuickTransportCleanup(void);
 static int ESP8266_MutexLock(uint32_t timeout_ms);
 static void ESP8266_MutexUnlock(void);
+int ESP8266_StartRxMonitor(void);
 
 /* ==================== UART2 缓冲区管理 ==================== */
 
@@ -78,12 +79,81 @@ static uint16_t GetUart2DmaRxLen(void)
     return (uint16_t)(RX_BUFFER_SIZE - __HAL_DMA_GET_COUNTER(&hdma_usart2_rx));
 }
 
+static uint16_t g_uart2_last_dma_len = 0;
+
 static void ClearRxBuffer(void)
 {
     taskENTER_CRITICAL();
     HAL_UART_DMAStop(&huart2);
     memset((void *)g_uart2_rx_buffer, 0, RX_BUFFER_SIZE);
+    g_uart2_last_dma_len = 0;
     taskEXIT_CRITICAL();
+}
+
+int ESP8266_StartRxMonitor(void)
+{
+    if (HAL_UART_GetState(&huart2) != HAL_UART_STATE_READY) {
+        return 0;
+    }
+
+    ClearRxBuffer();
+    if (HAL_UART_Receive_DMA(&huart2, (uint8_t *)g_uart2_rx_buffer, RX_BUFFER_SIZE) != HAL_OK) {
+        DebugPrintf("[ERR] UART2 RX monitor start failed\r\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+int ESP8266_GetRxDelta(char *buffer, uint16_t buffer_size, uint16_t *out_length)
+{
+    uint16_t current_len = 0;
+    uint16_t delta_len = 0;
+
+    if (buffer == NULL || out_length == NULL || buffer_size == 0) {
+        return -1;
+    }
+
+    buffer[0] = '\0';
+    *out_length = 0;
+
+    current_len = GetUart2DmaRxLen();
+    if (current_len == g_uart2_last_dma_len) {
+        return 0;
+    }
+
+    if (current_len > g_uart2_last_dma_len) {
+        delta_len = (uint16_t)(current_len - g_uart2_last_dma_len);
+        if (delta_len >= buffer_size) {
+            delta_len = (uint16_t)(buffer_size - 1);
+        }
+        memcpy(buffer, (const void *)&g_uart2_rx_buffer[g_uart2_last_dma_len], delta_len);
+    } else {
+        uint16_t tail_len = (uint16_t)(RX_BUFFER_SIZE - g_uart2_last_dma_len);
+        uint16_t head_len = current_len;
+
+        delta_len = (uint16_t)(tail_len + head_len);
+        if (delta_len >= buffer_size) {
+            delta_len = (uint16_t)(buffer_size - 1);
+        }
+
+        if (tail_len >= buffer_size) {
+            tail_len = (uint16_t)(buffer_size - 1);
+            head_len = 0;
+        } else if ((uint16_t)(tail_len + head_len) >= buffer_size) {
+            head_len = (uint16_t)(buffer_size - 1 - tail_len);
+        }
+
+        memcpy(buffer, (const void *)&g_uart2_rx_buffer[g_uart2_last_dma_len], tail_len);
+        if (head_len > 0) {
+            memcpy(buffer + tail_len, (const void *)g_uart2_rx_buffer, head_len);
+        }
+    }
+
+    buffer[delta_len] = '\0';
+    *out_length = delta_len;
+    g_uart2_last_dma_len = current_len;
+    return 0;
 }
 
 /* ==================== 核心通信函数 ==================== */
